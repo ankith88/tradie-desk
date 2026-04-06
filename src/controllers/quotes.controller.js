@@ -63,8 +63,8 @@ async function createQuote(req, res) {
       quoteNumber, customerName, customerEmail, customerPhone: customerPhone || '',
       jobType, location, estimatedHours: parseFloat(estimatedHours),
       materialsNeeded: materialsNeeded || '', totalExGST, gstAmount, totalIncGST,
-      status: 'Sent', emailBody, createdAt, validUntil, followUpSentAt: '',
-      version, previousVersionId: '', lastEdited: '', editHistory: '[]', xeroQuoteId: '',
+      status: 'Sent', emailBody, createdAt, validUntil,
+      version, editHistory: '[]', xeroQuoteId: '',
       acceptanceToken
     });
 
