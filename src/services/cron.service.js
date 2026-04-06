@@ -1,12 +1,10 @@
 /**
  * Cron Service — Background Automation
  *
- * Runs scheduled jobs using node-cron:
- *   - Every 6 hours: check for quotes needing a follow-up (48h after send)
- *   - Every 6 hours: check for invoices needing payment reminders (7d, 14d)
- *
- * This file is loaded once at server start and runs silently in the background.
- * No manual triggering required — the automations just work.
+ * Runs every 6 hours and handles:
+ *   - Quote 48h follow-ups
+ *   - Invoice payment reminders: day 1 (polite), day 7 (firmer), day 14 (final)
+ *   - Auto-marks invoices as Overdue when past due date
  */
 
 const cron = require('node-cron');
@@ -16,26 +14,19 @@ const { sendFollowUpEmail, sendPaymentReminder } = require('./email.service');
 
 console.log('⏰ Cron jobs initialised — automation is running');
 
-// ─── Quote Follow-Up: Every 6 hours ───────────────────────────────────────────
-// Checks for quotes in 'Sent' status that haven't been followed up
-// and were sent more than 48 hours ago.
+// ─── Quote Follow-Up (every 6 hours) ─────────────────────────────────────────
 cron.schedule('0 */6 * * *', async () => {
   console.log('[Cron] Running quote follow-up check...');
   try {
     const quotes = await airtable.getQuotesPendingFollowUp();
-    console.log(`[Cron] Found ${quotes.length} quote(s) needing follow-up`);
-
     for (const quote of quotes) {
       try {
         const emailBody = await generateFollowUpEmail(quote);
         await sendFollowUpEmail(quote.customerEmail, quote.customerName, emailBody, quote.quoteNumber);
-        await airtable.updateQuote(quote.id, {
-          status: 'Followed Up',
-          followUpSentAt: new Date().toISOString()
-        });
-        console.log(`[Cron] Follow-up sent for quote ${quote.quoteNumber} to ${quote.customerEmail}`);
+        await airtable.updateQuote(quote.id, { status: 'Followed Up', followUpSentAt: new Date().toISOString() });
+        console.log(`[Cron] Follow-up sent for ${quote.quoteNumber}`);
       } catch (err) {
-        console.error(`[Cron] Failed follow-up for quote ${quote.quoteNumber}:`, err.message);
+        console.error(`[Cron] Follow-up failed for ${quote.quoteNumber}:`, err.message);
       }
     }
   } catch (err) {
@@ -43,50 +34,78 @@ cron.schedule('0 */6 * * *', async () => {
   }
 });
 
-// ─── Invoice Reminder 1 (7 days overdue): Every 6 hours ───────────────────────
+// ─── Invoice Overdue Status Update (every 6 hours) ───────────────────────────
+// Mark invoices as Overdue when past due date but not yet Paid or Cancelled
 cron.schedule('0 */6 * * *', async () => {
-  console.log('[Cron] Running invoice 1st reminder check...');
+  const today = new Date().toISOString().split('T')[0];
   try {
-    const invoices = await airtable.getInvoicesPendingFirstReminder();
-    console.log(`[Cron] Found ${invoices.length} invoice(s) needing 1st reminder`);
+    const all = await airtable.getAllInvoices();
+    for (const inv of all) {
+      if (inv.status === 'Unpaid' && inv.dueDate && inv.dueDate < today) {
+        await airtable.updateInvoice(inv.id, { status: 'Overdue' });
+      }
+    }
+  } catch (err) {
+    console.error('[Cron] Overdue status update failed:', err.message);
+  }
+});
 
+// ─── Invoice Reminder 1: Day 1 overdue (every 6 hours) ───────────────────────
+cron.schedule('0 */6 * * *', async () => {
+  console.log('[Cron] Running invoice reminder 1 check...');
+  try {
+    const invoices = await airtable.getInvoicesPendingReminder1();
     for (const invoice of invoices) {
       try {
         const emailBody = await generatePaymentReminder(invoice, 'first');
         await sendPaymentReminder(invoice.customerEmail, invoice.customerName, emailBody, invoice.invoiceNumber);
-        await airtable.updateInvoice(invoice.id, {
-          firstReminderSentAt: new Date().toISOString()
-        });
-        console.log(`[Cron] 1st reminder sent for invoice ${invoice.invoiceNumber}`);
+        await airtable.updateInvoice(invoice.id, { reminder1SentAt: new Date().toISOString() });
+        console.log(`[Cron] Reminder 1 sent for ${invoice.invoiceNumber}`);
       } catch (err) {
-        console.error(`[Cron] 1st reminder failed for invoice ${invoice.invoiceNumber}:`, err.message);
+        console.error(`[Cron] Reminder 1 failed for ${invoice.invoiceNumber}:`, err.message);
       }
     }
   } catch (err) {
-    console.error('[Cron] Invoice 1st reminder check failed:', err.message);
+    console.error('[Cron] Reminder 1 check failed:', err.message);
   }
 });
 
-// ─── Invoice Reminder 2 (14 days overdue): Every 6 hours ──────────────────────
+// ─── Invoice Reminder 2: Day 7 overdue (every 6 hours) ───────────────────────
 cron.schedule('0 */6 * * *', async () => {
-  console.log('[Cron] Running invoice 2nd reminder check...');
+  console.log('[Cron] Running invoice reminder 2 check...');
   try {
-    const invoices = await airtable.getInvoicesPendingSecondReminder();
-    console.log(`[Cron] Found ${invoices.length} invoice(s) needing 2nd reminder`);
-
+    const invoices = await airtable.getInvoicesPendingReminder2();
     for (const invoice of invoices) {
       try {
         const emailBody = await generatePaymentReminder(invoice, 'second');
         await sendPaymentReminder(invoice.customerEmail, invoice.customerName, emailBody, invoice.invoiceNumber);
-        await airtable.updateInvoice(invoice.id, {
-          secondReminderSentAt: new Date().toISOString()
-        });
-        console.log(`[Cron] 2nd reminder sent for invoice ${invoice.invoiceNumber}`);
+        await airtable.updateInvoice(invoice.id, { reminder2SentAt: new Date().toISOString() });
+        console.log(`[Cron] Reminder 2 sent for ${invoice.invoiceNumber}`);
       } catch (err) {
-        console.error(`[Cron] 2nd reminder failed for invoice ${invoice.invoiceNumber}:`, err.message);
+        console.error(`[Cron] Reminder 2 failed for ${invoice.invoiceNumber}:`, err.message);
       }
     }
   } catch (err) {
-    console.error('[Cron] Invoice 2nd reminder check failed:', err.message);
+    console.error('[Cron] Reminder 2 check failed:', err.message);
+  }
+});
+
+// ─── Invoice Reminder 3: Day 14 overdue — Final Notice (every 6 hours) ───────
+cron.schedule('0 */6 * * *', async () => {
+  console.log('[Cron] Running invoice reminder 3 (final notice) check...');
+  try {
+    const invoices = await airtable.getInvoicesPendingReminder3();
+    for (const invoice of invoices) {
+      try {
+        const emailBody = await generatePaymentReminder(invoice, 'third');
+        await sendPaymentReminder(invoice.customerEmail, invoice.customerName, emailBody, invoice.invoiceNumber);
+        await airtable.updateInvoice(invoice.id, { reminder3SentAt: new Date().toISOString() });
+        console.log(`[Cron] Reminder 3 (final) sent for ${invoice.invoiceNumber}`);
+      } catch (err) {
+        console.error(`[Cron] Reminder 3 failed for ${invoice.invoiceNumber}:`, err.message);
+      }
+    }
+  } catch (err) {
+    console.error('[Cron] Reminder 3 check failed:', err.message);
   }
 });

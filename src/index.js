@@ -1,35 +1,32 @@
 /**
- * Tradie Desk - Main Server Entry Point
- *
- * Starts the Express server and initialises all background automation jobs
- * (cron jobs for follow-ups, etc.)
+ * Tradie Desk — Main Server Entry Point
  */
 
 require('dotenv').config();
 const express = require('express');
-const cors = require('cors');
-const path = require('path');
+const cors    = require('cors');
+const path    = require('path');
 
-const app = express();
+const app  = express();
 const PORT = process.env.PORT || 3001;
 
 // ─── Middleware ───────────────────────────────────────────────────────────────
 app.use(cors());
 
-// IMPORTANT: The Xero webhook endpoint needs the raw request body for HMAC signature
-// verification. express.raw() must be registered BEFORE express.json() for this path,
-// because once express.json() parses the body it can't be read as raw bytes again.
+// Xero webhook needs raw body for HMAC verification — must come BEFORE express.json()
 app.use('/api/xero/webhook', express.raw({ type: '*/*' }));
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // ─── API Routes ───────────────────────────────────────────────────────────────
-app.use('/api/quotes',   require('./routes/quotes.routes'));
-app.use('/api/jobs',     require('./routes/jobs.routes'));
-app.use('/api/invoices', require('./routes/invoices.routes'));
-app.use('/api/demo',     require('./routes/demo.routes'));
-app.use('/api/xero',     require('./routes/xero.routes'));
+app.use('/api/quotes',     require('./routes/quotes.routes'));
+app.use('/api/jobs',       require('./routes/jobs.routes'));
+app.use('/api/invoices',   require('./routes/invoices.routes'));
+app.use('/api/variations', require('./routes/variations.routes'));
+app.use('/api/jobnotes',   require('./routes/jobnotes.routes'));
+app.use('/api/demo',       require('./routes/demo.routes'));
+app.use('/api/xero',       require('./routes/xero.routes'));
 
 // ─── Health check ─────────────────────────────────────────────────────────────
 app.get('/api/health', (req, res) => {

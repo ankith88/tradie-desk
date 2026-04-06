@@ -439,6 +439,132 @@ async function getXeroInvoice(xeroInvoiceId) {
   return response.body.invoices[0];
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+//  PATCH — Quote Edits
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Update an existing Xero quote with revised line items.
+ * Called when a Tradie Desk quote is edited after being synced.
+ *
+ * @param {string} xeroQuoteId - the Xero quoteID stored in Airtable
+ * @param {Object} quoteData   - updated quote data (lineItems, totals, etc.)
+ */
+async function patchXeroQuote(xeroQuoteId, quoteData) {
+  const { xero, tenantId } = await getClient();
+  const taxRate = await getGSTTaxRate();
+
+  const lineItems = (quoteData.lineItems || []).map(item => ({
+    description: item.description,
+    quantity:    item.qty,
+    unitAmount:  parseFloat(item.unitPrice),
+    taxType:     taxRate.taxType,
+    accountCode: '200',
+  }));
+
+  await xero.accountingApi.updateQuote(tenantId, xeroQuoteId, {
+    quotes: [{
+      quoteID:   xeroQuoteId,
+      lineItems,
+      // Xero requires status on update — keep it at current status
+      status:    quoteData.xeroStatus || 'DRAFT',
+    }]
+  });
+
+  console.log(`[Xero] Patched quote ${xeroQuoteId} with updated line items`);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  PATCH — Invoice Edits + Variations
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Update an existing Xero invoice with revised or additional line items.
+ * Used when an invoice is edited or a variation is added.
+ *
+ * Note: Xero only allows updating invoices in DRAFT status.
+ * AUTHORISED invoices must be voided and recreated, or use credit notes.
+ * For simplicity we attempt the update and log any Xero-side rejection.
+ *
+ * @param {string} xeroInvoiceId  - Xero invoiceID
+ * @param {Object} invoiceData    - updated invoice (lineItems, dueDate)
+ */
+async function patchXeroInvoice(xeroInvoiceId, invoiceData) {
+  const { xero, tenantId } = await getClient();
+  const taxRate = await getGSTTaxRate();
+
+  const lineItems = (invoiceData.lineItems || []).map(item => ({
+    description: item.description,
+    quantity:    item.qty,
+    unitAmount:  parseFloat(item.unitPrice),
+    taxType:     taxRate.taxType,
+    accountCode: '200',
+  }));
+
+  const updatePayload = {
+    invoices: [{
+      invoiceID: xeroInvoiceId,
+      lineItems,
+    }]
+  };
+
+  if (invoiceData.dueDate) {
+    updatePayload.invoices[0].dueDate = new Date(invoiceData.dueDate);
+  }
+
+  await xero.accountingApi.updateInvoice(tenantId, xeroInvoiceId, updatePayload);
+  console.log(`[Xero] Patched invoice ${xeroInvoiceId}`);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Sync Logger — wraps Xero calls and logs to Airtable SyncLog table
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Execute a Xero sync action and write a SyncLog entry to Airtable.
+ * This is a utility that wraps any async Xero call.
+ *
+ * Usage:
+ *   const xeroId = await syncWithLog(
+ *     () => createXeroQuote(quoteData),
+ *     { action: 'CREATE_QUOTE', entityType: 'Quote', entityId: quoteNumber }
+ *   );
+ *
+ * @param {Function} fn          - async function that performs the Xero call
+ * @param {Object}   logMeta     - { action, entityType, entityId }
+ * @returns {*} result of fn, or throws on failure
+ */
+async function syncWithLog(fn, logMeta) {
+  // Lazy-load to avoid circular dependency at module init
+  const airtable = require('./airtable.service');
+  const timestamp = new Date().toISOString();
+
+  try {
+    const result = await fn();
+    await airtable.createSyncLog({
+      action:      logMeta.action,
+      entityType:  logMeta.entityType,
+      entityId:    logMeta.entityId,
+      xeroId:      typeof result === 'string' ? result : '',
+      status:      'Success',
+      timestamp,
+      errorMessage: ''
+    });
+    return result;
+  } catch (err) {
+    await airtable.createSyncLog({
+      action:       logMeta.action,
+      entityType:   logMeta.entityType,
+      entityId:     logMeta.entityId,
+      xeroId:       '',
+      status:       'Failed',
+      timestamp,
+      errorMessage: err.message
+    });
+    throw err;
+  }
+}
+
 module.exports = {
   getConsentUrl,
   handleOAuthCallback,
@@ -448,8 +574,11 @@ module.exports = {
   findOrCreateContact,
   createXeroQuote,
   acceptXeroQuote,
+  patchXeroQuote,
   createXeroInvoice,
+  patchXeroInvoice,
   attachPdfToInvoice,
   verifyWebhookSignature,
-  getXeroInvoice
+  getXeroInvoice,
+  syncWithLog
 };

@@ -1,29 +1,16 @@
 /**
  * Airtable Service
  *
- * All database operations go through here. Airtable acts as our database —
- * it's free, has a visual UI for the client to view their data, and has a
- * simple REST API.
+ * All database operations go through here.
  *
- * Required Tables in your Airtable Base:
- *   - Quotes:   quoteNumber, customerName, customerEmail, customerPhone,
- *               jobType, location, estimatedHours, materialsNeeded,
- *               totalExGST, gstAmount, totalIncGST, status, emailBody,
- *               createdAt, followUpSentAt, validUntil
+ * Tables required:
+ *   Quotes, Jobs, Invoices, JobNotes, Variations, SyncLog
  *
- *   - Jobs:     jobNumber, customerName, customerEmail, customerPhone,
- *               jobType, address, scheduledDate, scheduledTime,
- *               status, notes, quoteRef, createdAt
- *
- *   - Invoices: invoiceNumber, quoteRef, jobRef, customerName,
- *               customerEmail, customerPhone, jobType, location,
- *               totalExGST, gstAmount, totalIncGST, issueDate, dueDate,
- *               status, firstReminderSentAt, secondReminderSentAt
+ * See README for full field lists per table.
  */
 
 const Airtable = require('airtable');
 
-// Initialise Airtable with personal access token
 const base = new Airtable({ apiKey: process.env.AIRTABLE_API_KEY })
   .base(process.env.AIRTABLE_BASE_ID);
 
@@ -44,10 +31,14 @@ async function updateQuote(recordId, fields) {
   return { id: record.id, ...record.fields };
 }
 
-/**
- * Get all quotes that are still in 'Sent' status and were created
- * more than 48 hours ago (candidates for follow-up emails).
- */
+async function getAllQuotes() {
+  const records = await base('Quotes').select({
+    sort: [{ field: 'createdAt', direction: 'desc' }]
+  }).all();
+  return records.map(r => ({ id: r.id, ...r.fields }));
+}
+
+/** Quotes awaiting 48h follow-up (status = Sent, no follow-up yet, created > 48h ago) */
 async function getQuotesPendingFollowUp() {
   const cutoff = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
   const records = await base('Quotes').select({
@@ -56,9 +47,11 @@ async function getQuotesPendingFollowUp() {
   return records.map(r => ({ id: r.id, ...r.fields }));
 }
 
-async function getAllQuotes() {
+/** All versions of a quote (same quoteNumber, sorted by version asc) */
+async function getQuoteVersions(quoteNumber) {
   const records = await base('Quotes').select({
-    sort: [{ field: 'createdAt', direction: 'desc' }]
+    filterByFormula: `{quoteNumber} = '${quoteNumber}'`,
+    sort: [{ field: 'version', direction: 'asc' }]
   }).all();
   return records.map(r => ({ id: r.id, ...r.fields }));
 }
@@ -82,7 +75,25 @@ async function updateJob(recordId, fields) {
 
 async function getAllJobs() {
   const records = await base('Jobs').select({
-    sort: [{ field: 'scheduledDate', direction: 'asc' }]
+    sort: [{ field: 'startDate', direction: 'asc' }]
+  }).all();
+  return records.map(r => ({ id: r.id, ...r.fields }));
+}
+
+/** Jobs scheduled to start on or before today and not yet completed — for My Run */
+async function getJobsForDate(dateStr) {
+  // dateStr format: YYYY-MM-DD
+  const records = await base('Jobs').select({
+    filterByFormula: `AND({startDate} = '${dateStr}', OR({status} = 'Scheduled', {status} = 'In Progress'))`
+  }).all();
+  return records.map(r => ({ id: r.id, ...r.fields }));
+}
+
+/** All active jobs (not Completed or Invoiced) — for the weekly run view */
+async function getActiveJobs() {
+  const records = await base('Jobs').select({
+    filterByFormula: `OR({status} = 'Scheduled', {status} = 'In Progress', {status} = 'On Hold')`,
+    sort: [{ field: 'startDate', direction: 'asc' }]
   }).all();
   return records.map(r => ({ id: r.id, ...r.fields }));
 }
@@ -104,28 +115,6 @@ async function updateInvoice(recordId, fields) {
   return { id: record.id, ...record.fields };
 }
 
-/**
- * Get invoices that are unpaid and 7 days past due — ready for 1st reminder.
- */
-async function getInvoicesPendingFirstReminder() {
-  const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-  const records = await base('Invoices').select({
-    filterByFormula: `AND({status} = 'Unpaid', {firstReminderSentAt} = '', {dueDate} < '${cutoff}')`
-  }).all();
-  return records.map(r => ({ id: r.id, ...r.fields }));
-}
-
-/**
- * Get invoices that are unpaid, had a first reminder, and are now 14 days past due.
- */
-async function getInvoicesPendingSecondReminder() {
-  const cutoff = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-  const records = await base('Invoices').select({
-    filterByFormula: `AND({status} = 'Unpaid', {firstReminderSentAt} != '', {secondReminderSentAt} = '', {dueDate} < '${cutoff}')`
-  }).all();
-  return records.map(r => ({ id: r.id, ...r.fields }));
-}
-
 async function getAllInvoices() {
   const records = await base('Invoices').select({
     sort: [{ field: 'issueDate', direction: 'desc' }]
@@ -133,9 +122,125 @@ async function getAllInvoices() {
   return records.map(r => ({ id: r.id, ...r.fields }));
 }
 
+/** Invoices overdue by ≥1 day, no reminder 1 sent yet, reminders not disabled */
+async function getInvoicesPendingReminder1() {
+  const cutoff = new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+  const records = await base('Invoices').select({
+    filterByFormula: `AND(
+      OR({status} = 'Unpaid', {status} = 'Overdue'),
+      {reminder1SentAt} = '',
+      {remindersDisabled} != TRUE(),
+      {dueDate} < '${cutoff}'
+    )`
+  }).all();
+  return records.map(r => ({ id: r.id, ...r.fields }));
+}
+
+/** Overdue by ≥7 days, reminder 1 sent, no reminder 2 yet */
+async function getInvoicesPendingReminder2() {
+  const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+  const records = await base('Invoices').select({
+    filterByFormula: `AND(
+      OR({status} = 'Unpaid', {status} = 'Overdue'),
+      {reminder1SentAt} != '',
+      {reminder2SentAt} = '',
+      {remindersDisabled} != TRUE(),
+      {dueDate} < '${cutoff}'
+    )`
+  }).all();
+  return records.map(r => ({ id: r.id, ...r.fields }));
+}
+
+/** Overdue by ≥14 days, reminder 2 sent, no reminder 3 yet */
+async function getInvoicesPendingReminder3() {
+  const cutoff = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+  const records = await base('Invoices').select({
+    filterByFormula: `AND(
+      OR({status} = 'Unpaid', {status} = 'Overdue'),
+      {reminder2SentAt} != '',
+      {reminder3SentAt} = '',
+      {remindersDisabled} != TRUE(),
+      {dueDate} < '${cutoff}'
+    )`
+  }).all();
+  return records.map(r => ({ id: r.id, ...r.fields }));
+}
+
+// Keep backward-compatible aliases for old cron code
+const getInvoicesPendingFirstReminder  = getInvoicesPendingReminder1;
+const getInvoicesPendingSecondReminder = getInvoicesPendingReminder2;
+
+// ─── JobNotes ─────────────────────────────────────────────────────────────────
+
+async function createJobNote(noteData) {
+  const record = await base('JobNotes').create([{ fields: noteData }]);
+  return { id: record[0].id, ...record[0].fields };
+}
+
+async function getNotesForJob(jobId) {
+  const records = await base('JobNotes').select({
+    filterByFormula: `{jobId} = '${jobId}'`,
+    sort: [{ field: 'noteDate', direction: 'desc' }]
+  }).all();
+  return records.map(r => ({ id: r.id, ...r.fields }));
+}
+
+// ─── Variations ───────────────────────────────────────────────────────────────
+
+async function createVariation(variationData) {
+  const record = await base('Variations').create([{ fields: variationData }]);
+  return { id: record[0].id, ...record[0].fields };
+}
+
+async function getVariationsForJob(jobId) {
+  const records = await base('Variations').select({
+    filterByFormula: `{jobId} = '${jobId}'`,
+    sort: [{ field: 'dateAdded', direction: 'asc' }]
+  }).all();
+  return records.map(r => ({ id: r.id, ...r.fields }));
+}
+
+async function updateVariation(recordId, fields) {
+  const record = await base('Variations').update(recordId, fields);
+  return { id: record.id, ...record.fields };
+}
+
+// ─── SyncLog ──────────────────────────────────────────────────────────────────
+
+async function createSyncLog(logData) {
+  try {
+    const record = await base('SyncLog').create([{ fields: logData }]);
+    return { id: record[0].id, ...record[0].fields };
+  } catch (err) {
+    // SyncLog failures should never crash anything
+    console.warn('[SyncLog] Failed to write log entry:', err.message);
+    return null;
+  }
+}
+
+async function getAllSyncLogs() {
+  const records = await base('SyncLog').select({
+    sort: [{ field: 'timestamp', direction: 'desc' }],
+    maxRecords: 100
+  }).all();
+  return records.map(r => ({ id: r.id, ...r.fields }));
+}
+
 module.exports = {
-  createQuote, getQuoteById, updateQuote, getQuotesPendingFollowUp, getAllQuotes,
+  // Quotes
+  createQuote, getQuoteById, updateQuote, getAllQuotes,
+  getQuotesPendingFollowUp, getQuoteVersions,
+  // Jobs
   createJob, getJobById, updateJob, getAllJobs,
+  getJobsForDate, getActiveJobs,
+  // Invoices
   createInvoice, getInvoiceById, updateInvoice, getAllInvoices,
-  getInvoicesPendingFirstReminder, getInvoicesPendingSecondReminder
+  getInvoicesPendingReminder1, getInvoicesPendingReminder2, getInvoicesPendingReminder3,
+  getInvoicesPendingFirstReminder, getInvoicesPendingSecondReminder,
+  // JobNotes
+  createJobNote, getNotesForJob,
+  // Variations
+  createVariation, getVariationsForJob, updateVariation,
+  // SyncLog
+  createSyncLog, getAllSyncLogs
 };
