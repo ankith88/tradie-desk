@@ -10,9 +10,10 @@
  */
 
 const { v4: uuidv4 } = require('uuid');
-const airtable = require('../services/airtable.service');
+const airtable   = require('../services/airtable.service');
 const { generateInvoicePDF } = require('../services/pdf.service');
-const { sendInvoiceEmail } = require('../services/email.service');
+const { sendInvoiceEmail }   = require('../services/email.service');
+const xero       = require('../services/xero.service');
 
 /**
  * Create and send an invoice.
@@ -104,6 +105,26 @@ async function createInvoice(req, res) {
     });
 
     console.log(`[Invoice] Invoice ${invoiceNumber} created and sent successfully`);
+
+    // ── Sync to Xero (non-blocking) ────────────────────────────────────────
+    // Creates an AUTHORISED invoice in Xero and attaches the PDF to it.
+    // The Xero invoice reference is set to our invoiceNumber — webhooks use this
+    // to match back when the invoice is paid in Xero.
+    if (xero.getStatus().connected) {
+      xero.createXeroInvoice({ ...invoiceData, lineItems: invoiceData.lineItems || [] })
+        .then(async (xeroInvoiceId) => {
+          // Attach our generated PDF to the Xero invoice record
+          await xero.attachPdfToInvoice(
+            xeroInvoiceId,
+            pdfBuffer,
+            `Invoice-${invoiceNumber}.pdf`
+          );
+          // Save the Xero invoice ID back to Airtable for future reference
+          await airtable.updateInvoice(saved.id, { xeroInvoiceId });
+          console.log(`[Invoice] Synced to Xero — invoiceID: ${xeroInvoiceId}, PDF attached`);
+        })
+        .catch(err => console.warn('[Invoice] Xero sync failed (non-fatal):', err.message));
+    }
 
     res.status(201).json({
       success: true,

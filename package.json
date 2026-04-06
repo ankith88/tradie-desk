@@ -19,7 +19,8 @@
     "openai": "^4.20.1",
     "pdf-lib": "^1.17.1",
     "resend": "^2.0.0",
-    "uuid": "^9.0.0"
+    "uuid": "^9.0.0",
+    "xero-node": "^4.38.0"
   },
   "devDependencies": {
     "concurrently": "^8.2.2",

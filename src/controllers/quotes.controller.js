@@ -9,10 +9,11 @@
  */
 
 const { v4: uuidv4 } = require('uuid');
-const airtable = require('../services/airtable.service');
+const airtable    = require('../services/airtable.service');
 const { generateQuoteEmail } = require('../services/openai.service');
-const { generateQuotePDF } = require('../services/pdf.service');
-const { sendQuoteEmail } = require('../services/email.service');
+const { generateQuotePDF }   = require('../services/pdf.service');
+const { sendQuoteEmail }     = require('../services/email.service');
+const xero        = require('../services/xero.service');
 
 /**
  * Create a new quote.
@@ -23,6 +24,7 @@ const { sendQuoteEmail } = require('../services/email.service');
  * 3. Generate a PDF quote
  * 4. Send email with PDF to customer
  * 5. Save everything to Airtable
+ * 6. Sync to Xero as a DRAFT quote (if Xero is connected)
  */
 async function createQuote(req, res) {
   try {
@@ -98,6 +100,17 @@ async function createQuote(req, res) {
 
     console.log(`[Quote] Quote ${quoteNumber} created and sent successfully`);
 
+    // ── 6. Sync to Xero (non-blocking — Xero failure won't break the quote) ─
+    // Store the Xero quote ID back in Airtable so we can update it later
+    if (xero.getStatus().connected) {
+      xero.createXeroQuote({ ...quoteData, lineItems })
+        .then(async (xeroQuoteId) => {
+          await airtable.updateQuote(savedQuote.id, { xeroQuoteId });
+          console.log(`[Quote] Synced to Xero — quoteID: ${xeroQuoteId}`);
+        })
+        .catch(err => console.warn('[Quote] Xero sync failed (non-fatal):', err.message));
+    }
+
     res.status(201).json({
       success: true,
       message: `Quote ${quoteNumber} sent to ${customerEmail}`,
@@ -146,6 +159,14 @@ async function updateQuoteStatus(req, res) {
       return res.status(400).json({ error: `Invalid status. Must be one of: ${validStatuses.join(', ')}` });
     }
     const updated = await airtable.updateQuote(req.params.id, { status });
+
+    // If quote accepted and we have a Xero quote ID, update its status in Xero too
+    if (status === 'Accepted' && updated.xeroQuoteId && xero.getStatus().connected) {
+      xero.acceptXeroQuote(updated.xeroQuoteId)
+        .then(() => console.log(`[Quote] Xero quote ${updated.xeroQuoteId} → ACCEPTED`))
+        .catch(err => console.warn('[Quote] Xero accept failed (non-fatal):', err.message));
+    }
+
     res.json({ success: true, quote: updated });
   } catch (err) {
     res.status(500).json({ error: err.message });
