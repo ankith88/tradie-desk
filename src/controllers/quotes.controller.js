@@ -10,11 +10,13 @@
  *   POST   /api/quotes/:id/restore  — Restore a previous version
  */
 
+const { v4: uuidv4 } = require('uuid');
 const airtable = require('../services/airtable.service');
 const { generateQuoteEmail, generateUpdatedQuoteEmail, generateReApprovalEmail } = require('../services/openai.service');
 const { generateQuotePDF } = require('../services/pdf.service');
 const { sendQuoteEmail } = require('../services/email.service');
 const xero = require('../services/xero.service');
+const { Resend } = require('resend');
 
 const LABOUR_RATE = 120;
 
@@ -48,16 +50,21 @@ async function createQuote(req, res) {
                         estimatedHours: parseFloat(estimatedHours), materialsNeeded, lineItems,
                         totalExGST, gstAmount, totalIncGST, createdAt, validUntil, version };
 
+    const acceptanceToken = uuidv4();
+    const serverUrl = process.env.SERVER_URL || 'http://localhost:3001';
+    const acceptUrl = `${serverUrl}/api/quotes/accept?token=${acceptanceToken}`;
+
     const emailBody = await generateQuoteEmail(quoteData);
     const pdfBuffer = await generateQuotePDF(quoteData);
-    await sendQuoteEmail(customerEmail, customerName, emailBody, quoteNumber, pdfBuffer);
+    await sendQuoteEmail(customerEmail, customerName, emailBody, quoteNumber, pdfBuffer, acceptUrl);
 
     const savedQuote = await airtable.createQuote({
       quoteNumber, customerName, customerEmail, customerPhone: customerPhone || '',
       jobType, location, estimatedHours: parseFloat(estimatedHours),
       materialsNeeded: materialsNeeded || '', totalExGST, gstAmount, totalIncGST,
       status: 'Sent', emailBody, createdAt, validUntil, followUpSentAt: '',
-      version, previousVersionId: '', lastEdited: '', editHistory: '[]', xeroQuoteId: ''
+      version, previousVersionId: '', lastEdited: '', editHistory: '[]', xeroQuoteId: '',
+      acceptanceToken
     });
 
     // Sync to Xero (non-blocking)
@@ -270,6 +277,98 @@ async function restoreQuoteVersion(req, res) {
   }
 }
 
+// ─── Accept Quote by Token (client clicks email link) ─────────────────────────
+
+async function acceptQuoteByToken(req, res) {
+  const { token } = req.query;
+  if (!token) return res.status(400).send(acceptanceHtmlPage('error', 'Invalid link — no token provided.'));
+
+  try {
+    const quotes = await airtable.getAllQuotes();
+    const quote  = quotes.find(q => q.acceptanceToken === token);
+
+    if (!quote) return res.status(404).send(acceptanceHtmlPage('error', 'This acceptance link is invalid or has already been used.'));
+
+    if (quote.status === 'Accepted') {
+      return res.send(acceptanceHtmlPage('already', `Quote ${quote.quoteNumber} is already marked as accepted. Thank you!`));
+    }
+
+    // Mark as accepted
+    await airtable.updateQuote(quote.id, { status: 'Accepted', acceptanceToken: '' });
+
+    // Sync to Xero (non-blocking)
+    if (quote.xeroQuoteId && xero.getStatus().connected) {
+      xero.syncWithLog(
+        () => xero.acceptXeroQuote(quote.xeroQuoteId),
+        { action: 'ACCEPT_QUOTE', entityType: 'Quote', entityId: quote.quoteNumber }
+      ).catch(err => console.warn('[Quote] Xero accept failed (non-fatal):', err.message));
+    }
+
+    // Notify tradie by email (non-blocking)
+    const tradieEmail = process.env.BUSINESS_EMAIL;
+    if (tradieEmail && tradieEmail !== 'onboarding@resend.dev') {
+      const resend = new Resend(process.env.RESEND_API_KEY);
+      resend.emails.send({
+        from: `Tradie Desk <onboarding@resend.dev>`,
+        to: [tradieEmail],
+        subject: `✅ Quote Accepted — ${quote.quoteNumber} (${quote.customerName})`,
+        text: `Great news!\n\n${quote.customerName} has accepted quote ${quote.quoteNumber} for ${quote.jobType} at ${quote.location}.\n\nTotal: $${Number(quote.totalIncGST).toFixed(2)} inc GST\n\nLog in to Tradie Desk to schedule the job.`,
+      }).catch(err => console.warn('[Quote] Tradie notification failed (non-fatal):', err.message));
+    }
+
+    return res.send(acceptanceHtmlPage('success', quote));
+  } catch (err) {
+    console.error('[Quote] acceptQuoteByToken error:', err);
+    return res.status(500).send(acceptanceHtmlPage('error', 'Something went wrong. Please contact us directly.'));
+  }
+}
+
+/** Render a self-contained HTML confirmation page returned to the client's browser. */
+function acceptanceHtmlPage(type, data) {
+  const styles = `
+    body { font-family: Arial, sans-serif; background: #f9fafb; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }
+    .card { background: white; border-radius: 16px; padding: 48px 40px; max-width: 480px; width: 90%; text-align: center; box-shadow: 0 4px 24px rgba(0,0,0,0.08); }
+    h1 { margin: 0 0 12px; font-size: 28px; }
+    p { color: #555; line-height: 1.6; margin: 8px 0; }
+    .detail { background: #f0fdf4; border-radius: 8px; padding: 16px; margin-top: 24px; text-align: left; font-size: 14px; color: #166534; }
+    .detail strong { display: block; font-size: 16px; margin-bottom: 4px; }`;
+
+  if (type === 'success') {
+    const q = data;
+    return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Quote Accepted</title><style>${styles}</style></head>
+<body><div class="card">
+  <div style="font-size:56px">✅</div>
+  <h1 style="color:#16a34a">Quote Accepted!</h1>
+  <p>Thank you, <strong>${q.customerName}</strong>. We've received your acceptance and will be in touch shortly to confirm scheduling.</p>
+  <div class="detail">
+    <strong>${process.env.BUSINESS_NAME}</strong>
+    ${q.quoteNumber} — ${q.jobType}<br>
+    ${q.location}<br>
+    <strong style="margin-top:8px;display:block">Total: $${Number(q.totalIncGST).toFixed(2)} inc GST</strong>
+  </div>
+  <p style="margin-top:24px;font-size:13px;color:#888">Questions? Call us on ${process.env.BUSINESS_PHONE || ''}</p>
+</div></body></html>`;
+  }
+
+  if (type === 'already') {
+    return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Already Accepted</title><style>${styles}</style></head>
+<body><div class="card">
+  <div style="font-size:56px">👍</div>
+  <h1 style="color:#2563eb">Already Accepted</h1>
+  <p>${data}</p>
+</div></body></html>`;
+  }
+
+  // error
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Error</title><style>${styles}</style></head>
+<body><div class="card">
+  <div style="font-size:56px">❌</div>
+  <h1 style="color:#dc2626">Something went wrong</h1>
+  <p>${data}</p>
+  <p style="margin-top:16px;font-size:13px;color:#888">Please contact us directly on ${process.env.BUSINESS_PHONE || ''}</p>
+</div></body></html>`;
+}
+
 // ─── Standard CRUD ────────────────────────────────────────────────────────────
 
 async function getAllQuotes(req, res) {
@@ -295,15 +394,30 @@ async function updateQuoteStatus(req, res) {
     }
     const updated = await airtable.updateQuote(req.params.id, { status });
 
-    if (status === 'Accepted' && updated.xeroQuoteId && xero.getStatus().connected) {
-      xero.syncWithLog(
-        () => xero.acceptXeroQuote(updated.xeroQuoteId),
-        { action: 'ACCEPT_QUOTE', entityType: 'Quote', entityId: updated.quoteNumber }
-      ).catch(err => console.warn('[Quote] Xero accept failed (non-fatal):', err.message));
+    if (status === 'Accepted') {
+      // Xero sync
+      if (updated.xeroQuoteId && xero.getStatus().connected) {
+        xero.syncWithLog(
+          () => xero.acceptXeroQuote(updated.xeroQuoteId),
+          { action: 'ACCEPT_QUOTE', entityType: 'Quote', entityId: updated.quoteNumber }
+        ).catch(err => console.warn('[Quote] Xero accept failed (non-fatal):', err.message));
+      }
+
+      // Notify tradie (manual accept on behalf of client)
+      const tradieEmail = process.env.BUSINESS_EMAIL;
+      if (tradieEmail && tradieEmail !== 'onboarding@resend.dev') {
+        const resend = new Resend(process.env.RESEND_API_KEY);
+        resend.emails.send({
+          from: `Tradie Desk <onboarding@resend.dev>`,
+          to: [tradieEmail],
+          subject: `✅ Quote Accepted (Manual) — ${updated.quoteNumber} (${updated.customerName})`,
+          text: `You manually accepted quote ${updated.quoteNumber} on behalf of ${updated.customerName}.\n\nJob: ${updated.jobType} at ${updated.location}\nTotal: $${Number(updated.totalIncGST).toFixed(2)} inc GST\n\nLog in to Tradie Desk to schedule the job.`,
+        }).catch(err => console.warn('[Quote] Tradie notification failed (non-fatal):', err.message));
+      }
     }
 
     res.json({ success: true, quote: updated });
   } catch (err) { res.status(500).json({ error: err.message }); }
 }
 
-module.exports = { createQuote, editQuote, getQuoteHistory, restoreQuoteVersion, getAllQuotes, getQuote, updateQuoteStatus };
+module.exports = { createQuote, editQuote, getQuoteHistory, restoreQuoteVersion, getAllQuotes, getQuote, updateQuoteStatus, acceptQuoteByToken };

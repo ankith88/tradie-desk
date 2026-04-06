@@ -24,15 +24,15 @@ const FROM_EMAIL = process.env.BUSINESS_EMAIL
  * @param {string} emailBody - Plain text email body (from GPT)
  * @param {string} quoteNumber - Used in subject line
  * @param {Buffer|null} pdfAttachment - Optional PDF attachment
+ * @param {string|null} acceptUrl - If provided, injects an "Accept This Quote" CTA button
  */
-async function sendQuoteEmail(toEmail, customerName, emailBody, quoteNumber, pdfAttachment = null) {
+async function sendQuoteEmail(toEmail, customerName, emailBody, quoteNumber, pdfAttachment = null, acceptUrl = null) {
   const payload = {
     from: FROM_EMAIL,
     to: [toEmail],
     subject: `Your Quote from ${process.env.BUSINESS_NAME} — Ref: ${quoteNumber}`,
-    text: emailBody,
-    // Wrap plain text in minimal HTML for better email client rendering
-    html: textToHtml(emailBody)
+    text: emailBody + (acceptUrl ? `\n\nAccept this quote online: ${acceptUrl}` : ''),
+    html: textToHtml(emailBody, acceptUrl)
   };
 
   if (pdfAttachment) {
@@ -103,14 +103,29 @@ async function sendPaymentReminder(toEmail, customerName, emailBody, invoiceNumb
 /**
  * Convert plain text to a simple HTML email.
  * Converts newlines to <br> and wraps in a basic styled container.
+ * @param {string} text - Plain text body
+ * @param {string|null} acceptUrl - If provided, renders an "Accept This Quote" CTA button
  */
-function textToHtml(text) {
+function textToHtml(text, acceptUrl = null) {
   const escaped = text
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
 
   const withLineBreaks = escaped.replace(/\n/g, '<br>');
+
+  const acceptButton = acceptUrl ? `
+    <div style="text-align: center; margin: 32px 0;">
+      <a href="${acceptUrl}"
+         style="display: inline-block; background-color: #16a34a; color: #ffffff; font-size: 16px;
+                font-weight: bold; text-decoration: none; padding: 14px 36px; border-radius: 8px;
+                letter-spacing: 0.3px;">
+        ✅ Accept This Quote
+      </a>
+      <p style="margin-top: 12px; font-size: 12px; color: #888;">
+        One click — no login required. Your acceptance is recorded immediately.
+      </p>
+    </div>` : '';
 
   return `
 <!DOCTYPE html>
@@ -126,6 +141,7 @@ function textToHtml(text) {
 <body>
   <div class="container">
     <p>${withLineBreaks}</p>
+    ${acceptButton}
     <div class="footer">
       <strong>${process.env.BUSINESS_NAME}</strong><br>
       ABN: ${process.env.BUSINESS_ABN}<br>

@@ -1,10 +1,11 @@
 const express = require('express');
 const router  = express.Router();
 const { createQuote, editQuote, getQuoteHistory, restoreQuoteVersion,
-        getAllQuotes, getQuote, updateQuoteStatus } = require('../controllers/quotes.controller');
+        getAllQuotes, getQuote, updateQuoteStatus, acceptQuoteByToken } = require('../controllers/quotes.controller');
 
 router.post('/',                  createQuote);
 router.get('/',                   getAllQuotes);
+router.get('/accept',             acceptQuoteByToken);  // must be before /:id
 router.get('/:id',                getQuote);
 router.patch('/:id',              updateQuoteStatus);
 router.put('/:id/edit',           editQuote);

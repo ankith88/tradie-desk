@@ -37,6 +37,9 @@ export default function QuoteForm() {
   const [historyPanel,  setHistoryPanel]  = useState(null);  // { quoteId, history }
   const [loadingHistory,setLoadingHistory]= useState(false);
 
+  // Manual accept
+  const [acceptingId,   setAcceptingId]   = useState(null);
+
   useEffect(() => { fetchQuotes(); }, []);
 
   async function fetchQuotes() {
@@ -85,6 +88,16 @@ export default function QuoteForm() {
     } catch (e) {
       setEditResult({ error: e.response?.data?.error || e.message });
     } finally { setEditSubmitting(false); }
+  }
+
+  async function acceptOnBehalf(quote) {
+    if (!window.confirm(`Accept quote ${quote.quoteNumber} on behalf of ${quote.customerName}?`)) return;
+    setAcceptingId(quote.id);
+    try {
+      await axios.patch(`/api/quotes/${quote.id}`, { status: 'Accepted' });
+      fetchQuotes();
+    } catch (e) { alert(e.response?.data?.error || e.message); }
+    finally { setAcceptingId(null); }
   }
 
   async function loadHistory(quoteId) {
@@ -183,6 +196,14 @@ export default function QuoteForm() {
                     🕐 History
                   </button>
                 </div>
+                {!['Accepted', 'Rejected'].includes(q.status) && (
+                  <button
+                    onClick={() => acceptOnBehalf(q)}
+                    disabled={acceptingId === q.id}
+                    className="w-full mt-2 text-xs py-1.5 bg-green-50 border border-green-300 text-green-700 rounded-lg hover:bg-green-100 font-medium disabled:opacity-50">
+                    {acceptingId === q.id ? 'Accepting...' : '✅ Accept on behalf of client'}
+                  </button>
+                )}
               </div>
             ))}
           </div>
