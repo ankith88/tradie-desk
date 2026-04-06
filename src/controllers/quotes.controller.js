@@ -56,8 +56,9 @@ async function createQuote(req, res) {
 
     const emailBody = await generateQuoteEmail(quoteData);
     const pdfBuffer = await generateQuotePDF(quoteData);
-    await sendQuoteEmail(customerEmail, customerName, emailBody, quoteNumber, pdfBuffer, acceptUrl);
 
+    // Save to Airtable FIRST so the token is persisted before the email goes out.
+    // This ensures the acceptance link in the email is always valid.
     const savedQuote = await airtable.createQuote({
       quoteNumber, customerName, customerEmail, customerPhone: customerPhone || '',
       jobType, location, estimatedHours: parseFloat(estimatedHours),
@@ -66,6 +67,8 @@ async function createQuote(req, res) {
       version, previousVersionId: '', lastEdited: '', editHistory: '[]', xeroQuoteId: '',
       acceptanceToken
     });
+
+    await sendQuoteEmail(customerEmail, customerName, emailBody, quoteNumber, pdfBuffer, acceptUrl);
 
     // Sync to Xero (non-blocking)
     if (xero.getStatus().connected) {
